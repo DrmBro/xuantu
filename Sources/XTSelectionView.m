@@ -1,5 +1,6 @@
 #import "XTSelectionView.h"
 #import "XTAnnotation.h"
+#import "XTWindowSelection.h"
 #import "XTCommon.h"
 #import <QuartzCore/QuartzCore.h>
 
@@ -37,6 +38,10 @@
 @implementation XTSelectionView {
     NSPoint _anchor;
     NSRect _startRect;
+    XTWindowCandidate *_hoverCandidate;
+    XTWindowCandidate *_clickCandidate;
+    CGWindowID _lockedWindowID;
+    BOOL _startedFreeDrag;
     NSInteger _dragMode;
     BOOL _dragging;
     NSTrackingArea *_tracking;
@@ -72,6 +77,7 @@
 - (instancetype)initWithFrame:(NSRect)frame {
     if ((self = [super initWithFrame:frame])) {
         self.wantsLayer = YES;
+        _windowCandidates = @[];
         _annotations = [NSMutableArray array]; _undoStack = [NSMutableArray array]; _redoStack = [NSMutableArray array];
         _selectedIndex = NSNotFound; _editingIndex = NSNotFound;
         _styleWidth = 3; _styleFont = 20;
@@ -80,7 +86,7 @@
                     [NSColor colorWithSRGBRed:0.15 green:0.82 blue:0.42 alpha:1],
                     [NSColor colorWithSRGBRed:0.15 green:0.56 blue:1 alpha:1], NSColor.whiteColor, NSColor.blackColor];
         _styleColor = _colors.firstObject;
-        _instruction = XTLabel(@"拖动框选  ·  标注后 T 贴图  ·  回车复制  ·  Esc 取消", 13, NSFontWeightMedium);
+        _instruction = XTLabel(@"悬停选窗口 · 单击锁定 · 拖动框选 · T 贴图 · Esc 取消", 13, NSFontWeightMedium);
         _instruction.textColor = NSColor.whiteColor; _instruction.alignment = NSTextAlignmentCenter;
         _instruction.wantsLayer = YES; _instruction.layer.backgroundColor = [NSColor colorWithWhite:0.07 alpha:0.9].CGColor;
         _instruction.layer.cornerRadius = 10; [self addSubview:_instruction];
@@ -209,11 +215,13 @@
 }
 - (void)drawRect:(NSRect)dirtyRect {
     [self.snapshot drawInRect:self.bounds fromRect:NSZeroRect operation:NSCompositingOperationCopy fraction:1 respectFlipped:NO hints:nil];
+    NSRect shown = NSIsEmptyRect(self.selection) && _hoverCandidate ? _hoverCandidate.frame : self.selection;
+    BOOL preview = NSIsEmptyRect(self.selection) && _hoverCandidate != nil;
     NSBezierPath *shade = [NSBezierPath bezierPathWithRect:self.bounds];
-    if (!NSIsEmptyRect(self.selection)) [shade appendBezierPathWithRect:self.selection];
+    if (!NSIsEmptyRect(shown)) [shade appendBezierPathWithRect:shown];
     shade.windingRule = NSWindingRuleEvenOdd; [[NSColor colorWithWhite:0 alpha:0.43] setFill]; [shade fill];
-    if (NSIsEmptyRect(self.selection)) return;
-    [NSGraphicsContext saveGraphicsState]; [NSBezierPath clipRect:self.selection];
+    if (NSIsEmptyRect(shown)) return;
+    [NSGraphicsContext saveGraphicsState]; [NSBezierPath clipRect:shown];
     for (NSInteger i = 0; i < (NSInteger)_annotations.count; i++) if (!_textEditor || i != _editingIndex) [_annotations[i] draw];
     [_pending draw];
     XTAnnotation *selected = [self selectedAnnotation];
@@ -224,25 +232,83 @@
     }
     [NSGraphicsContext restoreGraphicsState];
     [[NSColor colorWithSRGBRed:0.2 green:0.9 blue:0.73 alpha:1] setStroke];
-    NSBezierPath *border = [NSBezierPath bezierPathWithRect:self.selection]; border.lineWidth = 1.5; [border stroke];
-    if (!_dragging && _tool == 0) for (NSValue *v in [self handlePoints]) {
+    NSBezierPath *border = [NSBezierPath bezierPathWithRect:shown]; border.lineWidth = 1.5; [border stroke];
+    if (!preview && !_dragging && _tool == 0) for (NSValue *v in [self handlePoints]) {
         NSPoint p = v.pointValue;
         NSBezierPath *handle = [NSBezierPath bezierPathWithRoundedRect:NSMakeRect(p.x - 3.5, p.y - 3.5, 7, 7) xRadius:1.5 yRadius:1.5];
         [NSColor.whiteColor setFill]; [handle fill]; [XTAccent() setStroke]; [handle stroke];
     }
     NSSize pixels = XTPixelSize(self.snapshot);
-    NSString *size = [NSString stringWithFormat:@"%.0f × %.0f", self.selection.size.width * pixels.width / self.bounds.size.width, self.selection.size.height * pixels.height / self.bounds.size.height];
+    NSString *size = [NSString stringWithFormat:@"%@%.0f × %.0f", preview ? @"窗口 · " : @"", shown.size.width * pixels.width / self.bounds.size.width, shown.size.height * pixels.height / self.bounds.size.height];
     NSDictionary *attributes = @{NSFontAttributeName:[NSFont monospacedDigitSystemFontOfSize:12 weight:NSFontWeightMedium], NSForegroundColorAttributeName:NSColor.whiteColor};
     NSSize labelSize = [size sizeWithAttributes:attributes];
-    CGFloat x = MIN(self.bounds.size.width - labelSize.width - 16, MAX(4, NSMinX(self.selection)));
-    CGFloat y = MIN(self.bounds.size.height - 27, NSMaxY(self.selection) + 7);
+    CGFloat x = MIN(self.bounds.size.width - labelSize.width - 16, MAX(4, NSMinX(shown)));
+    CGFloat y = MIN(self.bounds.size.height - 27, NSMaxY(shown) + 7);
     [[NSColor colorWithWhite:0.08 alpha:0.95] setFill];
     [[NSBezierPath bezierPathWithRoundedRect:NSMakeRect(x, y, labelSize.width + 16, 24) xRadius:5 yRadius:5] fill];
     [size drawAtPoint:NSMakePoint(x + 8, y + 5) withAttributes:attributes];
 }
-- (void)mouseEntered:(NSEvent *)event { [self mouseMoved:event]; }
+- (NSArray<XTWindowCandidate *> *)windowHitsAt:(NSPoint)point {
+    return [XTWindowSelection candidates:self.windowCandidates atLocalPoint:point];
+}
+- (void)setWindowCandidates:(NSArray<XTWindowCandidate *> *)windowCandidates {
+    _windowCandidates = [windowCandidates copy];
+    _instruction.stringValue = _windowCandidates.count ? @"悬停选窗口 · 单击锁定 · 拖动框选 · Tab 切换窗口" : @"拖动框选 · 标注后 T 贴图 · 回车复制 · Esc 取消";
+}
+- (void)refreshWindowHover {
+    if (!self.window || _dragging || !NSIsEmptyRect(self.selection)) return;
+    NSPoint global = NSEvent.mouseLocation;
+    NSPoint point = [self convertPoint:[self.window convertPointFromScreen:global] fromView:nil];
+    XTWindowCandidate *candidate = NSPointInRect(point, self.bounds) ? [self windowHitsAt:point].firstObject : nil;
+    if (_hoverCandidate.windowID != candidate.windowID || !NSEqualRects(_hoverCandidate.frame, candidate.frame)) {
+        _hoverCandidate = candidate; self.needsDisplay = YES;
+    }
+}
+- (void)mouseExited:(NSEvent *)event {
+    if (NSIsEmptyRect(self.selection)) { _hoverCandidate = nil; self.needsDisplay = YES; }
+}
+- (BOOL)canCycleWindows { return !_dragging && !_textEditor && _annotations.count == 0; }
+- (BOOL)cycleWindowBackward:(BOOL)backward lockSelection:(BOOL)lockSelection {
+    if (![self canCycleWindows]) {
+        NSBeep(); _styleHint.stringValue = @"有标注时不切换窗口"; return NO;
+    }
+    NSPoint point = [self convertPoint:[self.window convertPointFromScreen:NSEvent.mouseLocation] fromView:nil];
+    NSArray<XTWindowCandidate *> *hits = [self windowHitsAt:point];
+    if (!hits.count) { NSBeep(); return NO; }
+    BOOL preview = NSIsEmptyRect(self.selection) && !lockSelection;
+    CGWindowID current = preview ? _hoverCandidate.windowID : _lockedWindowID;
+    NSInteger index = NSNotFound;
+    for (NSInteger i = 0; i < (NSInteger)hits.count; i++) if (hits[i].windowID == current) { index = i; break; }
+    if (index == NSNotFound) index = backward ? (NSInteger)hits.count - 1 : 0;
+    else index = (index + (backward ? -1 : 1) + (NSInteger)hits.count) % (NSInteger)hits.count;
+    XTWindowCandidate *candidate = hits[index];
+    if (preview) { _hoverCandidate = candidate; self.needsDisplay = YES; }
+    else {
+        [self.delegate selectionViewDidBegin:self];
+        self.selection = candidate.frame; _lockedWindowID = candidate.windowID;
+        // 更换裁剪上下文后不允许撤销恢复另一个窗口里的旧标注。
+        [_undoStack removeAllObjects]; [_redoStack removeAllObjects];
+        _hoverCandidate = nil; _instruction.hidden = YES; _toolbar.hidden = NO;
+        _selectedIndex = NSNotFound; [self positionToolbar]; [self refreshToolbar];
+    }
+    [self.window makeKeyWindow]; [self.window makeFirstResponder:self];
+    return YES;
+}
+- (void)mouseEntered:(NSEvent *)event {
+    // 未锁定时让光标所在显示器接收 Tab；已有选区的键盘焦点保留至用户点击。
+    if (NSIsEmptyRect(self.selection)) {
+        BOOL otherLocked = NO;
+        for (NSWindow *window in NSApp.windows) {
+            if (window != self.window && [window.contentView isKindOfClass:XTSelectionView.class] && !NSIsEmptyRect(((XTSelectionView *)window.contentView).selection)) { otherLocked = YES; break; }
+        }
+        if (!otherLocked) { [self.window makeKeyWindow]; [self.window makeFirstResponder:self]; }
+    }
+    [self mouseMoved:event];
+}
 - (void)mouseMoved:(NSEvent *)event {
+    [self refreshWindowHover];
     NSPoint p = [self convertPoint:event.locationInWindow fromView:nil];
+    if (NSIsEmptyRect(self.selection) && _hoverCandidate) { [NSCursor.crosshairCursor set]; return; }
     if (!_toolbar.hidden && NSPointInRect(p, _toolbar.frame)) { [NSCursor.arrowCursor set]; return; }
     if (_textEditor && NSPointInRect(p, [_editorScroll convertRect:_editorScroll.bounds toView:self])) { [NSCursor.IBeamCursor set]; return; }
     NSInteger handle = [self handleAt:p];
@@ -275,6 +341,12 @@
     [self commitTextEditing];
     [self.window makeKeyWindow]; [self.window makeFirstResponder:self];
     [self.delegate selectionViewDidBegin:self];
+    _clickCandidate = nil; _startedFreeDrag = NO;
+    if (NSIsEmptyRect(self.selection)) {
+        if (_hoverCandidate && NSPointInRect(p, _hoverCandidate.frame)) _clickCandidate = _hoverCandidate;
+        else _clickCandidate = [self windowHitsAt:p].firstObject;
+    }
+    _hoverCandidate = nil;
     _dragging = NO; _dragMode = -1; _anchor = p; _startRect = self.selection;
     _pending = nil; _movingOriginal = nil; _moveBaseline = nil; _moveChanged = NO;
     NSInteger hit = [self annotationAt:p];
@@ -304,7 +376,7 @@
     if (_annotations.count > 0 && handle < 0 && !NSPointInRect(p, self.selection)) { [self refreshToolbar]; return; }
     _dragMode = handle >= 0 ? handle + 2 : (hasSelection && NSPointInRect(p, self.selection) ? 1 : 0);
     _dragging = YES;
-    if (_dragMode == 0) { self.selection = NSZeroRect; [_annotations removeAllObjects]; [_undoStack removeAllObjects]; [_redoStack removeAllObjects]; _tool = 0; }
+    if (_dragMode == 0) { _lockedWindowID = kCGNullWindowID; self.selection = NSZeroRect; [_annotations removeAllObjects]; [_undoStack removeAllObjects]; [_redoStack removeAllObjects]; _tool = 0; }
     _toolbar.hidden = YES; _instruction.hidden = YES; [self refreshToolbar];
 }
 - (NSSize)clampedTranslation:(NSSize)delta forItem:(XTAnnotation *)item {
@@ -331,6 +403,10 @@
         self.needsDisplay = YES; return;
     }
     if (_dragMode == 0) {
+        NSPoint raw = [self convertPoint:event.locationInWindow fromView:nil];
+        if (hypot(raw.x - _anchor.x, raw.y - _anchor.y) >= 4) _startedFreeDrag = YES;
+        if (!_startedFreeDrag) return;
+        _clickCandidate = nil;
         self.selection = NSMakeRect(MIN(p.x, _anchor.x), MIN(p.y, _anchor.y), fabs(p.x - _anchor.x), fabs(p.y - _anchor.y));
     } else if (_dragMode == 1) {
         NSRect r = _startRect;
@@ -361,6 +437,10 @@
         if (_moveChanged) [self recordBefore:_moveBaseline];
         _movingOriginal = nil; _moveBaseline = nil; [self refreshToolbar]; return;
     }
+    if (_dragMode == 0 && !_startedFreeDrag && _clickCandidate) {
+        self.selection = _clickCandidate.frame; _lockedWindowID = _clickCandidate.windowID;
+    }
+    _clickCandidate = nil;
     if (self.selection.size.width < 3 || self.selection.size.height < 3) { [self clearSelection]; return; }
     if (_dragMode == 0 && [[NSUserDefaults standardUserDefaults] boolForKey:@"autoPin"]) { [self pinAction:nil]; return; }
     [self positionToolbar]; _toolbar.hidden = NO; [self refreshToolbar];
@@ -371,7 +451,8 @@
 }
 - (void)clearSelection {
     [self cancelTextEditing];
-    self.selection = NSZeroRect; _toolbar.hidden = YES; _instruction.hidden = NO; _dragging = NO;
+    self.selection = NSZeroRect; _hoverCandidate = nil; _clickCandidate = nil; _lockedWindowID = kCGNullWindowID;
+    _toolbar.hidden = YES; _instruction.hidden = NO; _dragging = NO;
     _pending = nil; _selectedIndex = NSNotFound; _tool = 0;
     [_annotations removeAllObjects]; [_undoStack removeAllObjects]; [_redoStack removeAllObjects]; [self refreshToolbar];
 }
@@ -529,6 +610,7 @@
     NSString *key = event.charactersIgnoringModifiers.lowercaseString;
     BOOL command = (event.modifierFlags & NSEventModifierFlagCommand) != 0;
     if (event.keyCode == 53) { [self.delegate selectionViewDidCancel:self]; return; }
+    if (!command && event.keyCode == 48) { [self.delegate selectionView:self cycleWindowBackward:(event.modifierFlags & NSEventModifierFlagShift) != 0]; return; }
     if (NSIsEmptyRect(self.selection)) { NSBeep(); return; }
     if (command && [key isEqual:@"z"]) {
         if (event.modifierFlags & NSEventModifierFlagShift) [self redo:nil]; else [self undo:nil];

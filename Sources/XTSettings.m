@@ -19,7 +19,7 @@
     NSPopUpButton *_presets;
 }
 - (instancetype)initWithHotKeys:(XTHotKeys *)hotKeys {
-    NSWindow *window = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 640, 690)
+    NSWindow *window = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 640, 722)
                                                 styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskMiniaturizable
                                                   backing:NSBackingStoreBuffered defer:NO];
     if ((self = [super initWithWindow:window])) {
@@ -42,7 +42,7 @@
     [view addSubview:box];
 }
 - (void)buildInterface {
-    XTSettingsRoot *root = [[XTSettingsRoot alloc] initWithFrame:NSMakeRect(0, 0, 640, 690)];
+    XTSettingsRoot *root = [[XTSettingsRoot alloc] initWithFrame:NSMakeRect(0, 0, 640, 722)];
     self.window.contentView = root;
     NSImageView *icon = [[NSImageView alloc] initWithFrame:NSMakeRect(28, 20, 64, 64)];
     icon.image = NSApp.applicationIconImage; icon.imageScaling = NSImageScaleProportionallyUpOrDown; [root addSubview:icon];
@@ -81,24 +81,24 @@
     [_presets addItemsWithTitles:@[@"选择快捷键预设…", @"悬图：⌥⌘ + A / S / H", @"Option 预设：⌥ + A / S / H", @"Control 预设：⌃ + A / S / H"]];
     _presets.target = self; _presets.action = @selector(presetChanged:);
     _presets.toolTip = @"预设会全局占用所选组合键；与其他程序冲突时会保留原配置。"; [root addSubview:_presets];
-    [self addCard:NSMakeRect(28, 390, 584, 190) to:root];
+    [self addCard:NSMakeRect(28, 390, 584, 222) to:root];
     [self addLabel:@"截图与贴图" frame:NSMakeRect(46, 404, 400, 22) size:14 weight:NSFontWeightSemibold secondary:NO to:root];
-    NSArray *toggleNames = @[@"框选后直接贴图（跳过标注）", @"截图时排除悬图窗口", @"双击复制并关闭贴图", @"圆角贴图"];
-    NSArray *toggleKeys = @[@"autoPin", @"excludePins", @"doubleClickCloses", @"roundedPins"];
+    NSArray *toggleNames = @[@"框选后直接贴图（跳过标注）", @"截图时排除悬图窗口", @"双击复制并关闭贴图", @"圆角贴图", @"悬停自动选择窗口"];
+    NSArray *toggleKeys = @[@"autoPin", @"excludePins", @"doubleClickCloses", @"roundedPins", @"autoSelectWindows"];
     for (NSUInteger i = 0; i < toggleNames.count; i++) {
         CGFloat x = i % 2 == 0 ? 46 : 334;
-        CGFloat y = i < 2 ? 442 : 476;
+        CGFloat y = 442 + (i / 2) * 34;
         NSButton *button = [NSButton checkboxWithTitle:toggleNames[i] target:self action:@selector(toggleChanged:)];
         button.frame = NSMakeRect(x, y, 250, 22); button.identifier = toggleKeys[i];
         _toggles[toggleKeys[i]] = button; [root addSubview:button];
     }
-    [self addLabel:@"新贴图不透明度" frame:NSMakeRect(46, 534, 140, 23) size:12 weight:NSFontWeightRegular secondary:NO to:root];
+    [self addLabel:@"新贴图不透明度" frame:NSMakeRect(46, 566, 140, 23) size:12 weight:NSFontWeightRegular secondary:NO to:root];
     _opacity = [NSSlider sliderWithValue:1 minValue:0.2 maxValue:1 target:self action:@selector(opacityChanged:)];
-    _opacity.frame = NSMakeRect(201, 528, 310, 28); _opacity.continuous = YES; [root addSubview:_opacity];
-    _opacityLabel = [self addLabel:@"100%" frame:NSMakeRect(534, 533, 60, 22) size:12 weight:NSFontWeightMedium secondary:YES to:root];
-    _permissionLabel = [self addLabel:@"" frame:NSMakeRect(30, 598, 578, 38) size:11 weight:NSFontWeightRegular secondary:YES to:root];
+    _opacity.frame = NSMakeRect(201, 560, 310, 28); _opacity.continuous = YES; [root addSubview:_opacity];
+    _opacityLabel = [self addLabel:@"100%" frame:NSMakeRect(534, 565, 60, 22) size:12 weight:NSFontWeightMedium secondary:YES to:root];
+    _permissionLabel = [self addLabel:@"" frame:NSMakeRect(30, 630, 578, 38) size:11 weight:NSFontWeightRegular secondary:YES to:root];
     _permissionLabel.maximumNumberOfLines = 2; _permissionLabel.lineBreakMode = NSLineBreakByWordWrapping;
-    [self addLabel:@"拖动移动 · 滚轮缩放 · ⌥滚轮调透明度 · 右键更多操作" frame:NSMakeRect(30, 644, 580, 20) size:11 weight:NSFontWeightRegular secondary:YES to:root];
+    [self addLabel:@"拖动移动 · 滚轮缩放 · ⌥滚轮调透明度 · 右键更多操作" frame:NSMakeRect(30, 676, 580, 20) size:11 weight:NSFontWeightRegular secondary:YES to:root];
     [self refresh];
 }
 - (void)show { [self refresh]; [NSApp activateIgnoringOtherApps:YES]; [self showWindow:nil]; [self.window makeKeyAndOrderFront:nil]; }

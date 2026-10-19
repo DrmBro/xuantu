@@ -168,7 +168,7 @@
     }
 }
 - (void)about:(id)sender {
-    XTAlert(@"悬图 1.1.3", @"独立的 macOS 截图与悬浮贴图工具。\n\n图片仅在本机处理，不自动上传。\n\n贴图：拖动移动，滚轮缩放，⌥滚轮调整透明度。\n双击复制并关闭；Esc / ⌘W 仅关闭。\n截图：V 选择、R 矩形、A 箭头、X 文本。\n标注：⌘Z 撤销、⇧⌘Z 重做，文字编辑时⌘回车完成。\n导出：T 贴图，回车复制，⌘S 保存，Esc 取消。");
+    XTAlert(@"悬图 1.2.0", @"独立的 macOS 截图与悬浮贴图工具。\n\n图片仅在本机处理，不自动上传。\n\n贴图：拖动移动，滚轮缩放，⌥滚轮调整透明度。\n双击复制并关闭；Esc / ⌘W 仅关闭。\n截图：悬停选窗口，单击锁定，拖动框选，Tab 切换窗口。\n标注：V 选择、R 矩形、A 箭头、X 文本。\n标注：⌘Z 撤销、⇧⌘Z 重做，文字编辑时⌘回车完成。\n导出：T 贴图，回车复制，⌘S 保存，Esc 取消。");
 }
 - (void)quit:(id)sender { [NSApp terminate:nil]; }
 - (NSApplicationTerminateReply)applicationShouldTerminate:(NSApplication *)sender {

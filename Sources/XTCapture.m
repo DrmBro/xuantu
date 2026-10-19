@@ -1,6 +1,7 @@
 #import "XTCapture.h"
 #import "XTCommon.h"
 #import "XTSelectionView.h"
+#import "XTWindowSelection.h"
 #import <ScreenCaptureKit/ScreenCaptureKit.h>
 #import <QuartzCore/QuartzCore.h>
 
@@ -16,6 +17,7 @@
 @property (nonatomic, strong) NSMutableArray<NSPanel *> *panels;
 @property (nonatomic, weak) XTSelectionView *selectedView;
 @property (nonatomic, strong) NSRunningApplication *previousApplication;
+@property (nonatomic, copy) NSArray<XTWindowCandidate *> *windowCandidates;
 - (void)selectView:(XTSelectionView *)view;
 - (void)finishView:(XTSelectionView *)view action:(NSString *)action;
 @end
@@ -70,6 +72,19 @@
     if ([[NSUserDefaults standardUserDefaults] boolForKey:@"excludePins"]) {
         for (SCWindow *window in content.windows) if (window.owningApplication.processID == getpid()) [excluded addObject:window];
     }
+    self.windowCandidates = @[];
+    if ([[NSUserDefaults standardUserDefaults] boolForKey:@"autoSelectWindows"]) {
+        NSMutableSet<NSNumber *> *shareable = [NSMutableSet set];
+        NSMutableSet<NSNumber *> *excludedIDs = [NSMutableSet set];
+        NSMutableSet<NSNumber *> *pinIDs = [NSMutableSet set];
+        for (SCWindow *window in content.windows) [shareable addObject:@(window.windowID)];
+        for (SCWindow *window in excluded) [excludedIDs addObject:@(window.windowID)];
+        for (NSWindow *window in NSApp.windows) {
+            if (window.isVisible && window.level == NSFloatingWindowLevel && window.windowNumber > 0)
+                [pinIDs addObject:@(window.windowNumber)];
+        }
+        self.windowCandidates = [XTWindowSelection captureCandidatesForShareableIDs:shareable excludedIDs:excludedIDs allowedOwnPinIDs:pinIDs];
+    }
     dispatch_group_t group = dispatch_group_create();
     for (NSScreen *screen in screens) {
         CGDirectDisplayID displayID = [screen.deviceDescription[@"NSScreenNumber"] unsignedIntValue];
@@ -112,17 +127,34 @@
         panel.collectionBehavior = NSWindowCollectionBehaviorCanJoinAllSpaces | NSWindowCollectionBehaviorFullScreenAuxiliary | NSWindowCollectionBehaviorStationary;
         XTSelectionView *view = [[XTSelectionView alloc] initWithFrame:NSMakeRect(0, 0, frame.size.width, frame.size.height)];
         view.snapshot = item[@"image"]; view.screenFrame = frame; view.delegate = self;
+        view.windowCandidates = [XTWindowSelection candidates:self.windowCandidates forScreenFrame:frame];
         panel.contentView = view; [self.panels addObject:panel];
         [panel orderFrontRegardless];
         if (NSPointInRect(NSEvent.mouseLocation, frame)) keyPanel = panel;
     }
     keyPanel = keyPanel ?: self.panels.firstObject;
     [keyPanel makeKeyWindow]; [keyPanel makeFirstResponder:keyPanel.contentView];
+    [(XTSelectionView *)keyPanel.contentView refreshWindowHover];
     [NSCursor.crosshairCursor set];
 }
 - (void)selectionViewDidBegin:(XTSelectionView *)view { [self selectView:view]; }
 - (void)selectionViewDidCancel:(XTSelectionView *)view { [self cancel]; }
 - (void)selectionView:(XTSelectionView *)view didFinishWithAction:(NSString *)action { [self finishView:view action:action]; }
+- (void)selectionView:(XTSelectionView *)view cycleWindowBackward:(BOOL)backward {
+    // 键盘焦点可能仍在已锁定的另一块屏幕，Tab 按全局光标位置路由。
+    for (NSPanel *panel in self.panels) {
+        if (![(XTSelectionView *)panel.contentView canCycleWindows]) { NSBeep(); return; }
+    }
+    NSPoint cursor = NSEvent.mouseLocation;
+    BOOL locked = self.selectedView && !NSIsEmptyRect(self.selectedView.selection);
+    for (NSPanel *panel in self.panels) {
+        if (NSPointInRect(cursor, panel.frame)) {
+            [(XTSelectionView *)panel.contentView cycleWindowBackward:backward lockSelection:locked];
+            return;
+        }
+    }
+    NSBeep();
+}
 - (void)selectView:(XTSelectionView *)view {
     if (self.selectedView != view) [self.selectedView clearSelection];
     self.selectedView = view;
@@ -143,7 +175,7 @@
 - (void)cancel {
     ++self.generation;
     for (NSPanel *panel in self.panels) { [panel orderOut:nil]; [panel close]; }
-    [self.panels removeAllObjects]; self.selectedView = nil;
+    [self.panels removeAllObjects]; self.selectedView = nil; self.windowCandidates = @[];
     self.active = NO; [NSCursor.arrowCursor set];
     [self.previousApplication activateWithOptions:0]; self.previousApplication = nil;
 }

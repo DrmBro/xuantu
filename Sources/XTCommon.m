@@ -7,7 +7,7 @@ NSString * const XTDefaultsDidChange = @"XTDefaultsDidChange";
 void XTRegisterDefaults(void) {
     [[NSUserDefaults standardUserDefaults] registerDefaults:@{
         @"doubleClickCloses": @YES, @"roundedPins": @YES,
-        @"autoPin": @NO, @"excludePins": @NO,
+        @"autoPin": @NO, @"excludePins": @NO, @"autoSelectWindows": @YES,
         @"defaultOpacity": @1.0,
         @"shortcuts": @[@{@"key": @0, @"mods": @(NSEventModifierFlagCommand | NSEventModifierFlagOption)},
                          @{@"key": @1, @"mods": @(NSEventModifierFlagCommand | NSEventModifierFlagOption)},
