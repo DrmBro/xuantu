@@ -1,14 +1,13 @@
 #import "XTPin.h"
 #import "XTCommon.h"
+#import "XuanTuText-Swift.h"
 #import <QuartzCore/QuartzCore.h>
 
-@interface XTPinPanel : NSPanel @end
-@implementation XTPinPanel
-- (BOOL)canBecomeKeyWindow { return YES; }
-- (BOOL)canBecomeMainWindow { return NO; }
+@class XTPinView;
+@interface XTPinPanel : NSPanel
+@property (nonatomic, weak) XTPinView *pinView;
 @end
 
-@class XTPinView;
 @interface XTPinController ()
 @property (nonatomic, readwrite) NSImage *image;
 @property (nonatomic) CGFloat scale;
@@ -17,6 +16,12 @@
 - (void)scaleBy:(CGFloat)factor;
 - (void)changeOpacity:(CGFloat)delta;
 - (void)copy:(id)sender;
+- (void)copyImage:(id)sender;
+- (void)copySelectedText:(id)sender;
+- (void)copyAllText:(id)sender;
+- (void)selectAll:(id)sender;
+- (void)extractText:(id)sender;
+- (void)recognizeText:(id)sender;
 - (void)save:(id)sender;
 - (void)closePin:(id)sender;
 - (void)resetSize:(id)sender;
@@ -28,24 +33,64 @@
 @property (nonatomic, weak) XTPinController *owner;
 @property (nonatomic, strong) NSView *toolbar;
 @property (nonatomic, strong) NSTextField *feedback;
+@property (nonatomic, strong) NSButton *textButton;
+@property (nonatomic, strong) XTTextSelectionController *textSelection;
+- (BOOL)handleShortcut:(NSEvent *)event;
+- (BOOL)handleWindowEvent:(NSEvent *)event;
+- (void)clearSpaceDrag;
+- (void)startTextRecognition;
 - (void)flash:(NSString *)message;
 @end
+
+@implementation XTPinPanel
+- (BOOL)canBecomeKeyWindow { return YES; }
+- (BOOL)canBecomeMainWindow { return NO; }
+- (void)sendEvent:(NSEvent *)event {
+    if (event.type == NSEventTypeLeftMouseDown) [self makeKeyWindow];
+    // 选择层获得焦点后，滚轮和捏合仍然控制整张贴图。
+    if (event.type == NSEventTypeScrollWheel) { [self.pinView scrollWheel:event]; return; }
+    if (event.type == NSEventTypeMagnify) { [self.pinView magnifyWithEvent:event]; return; }
+    if (![self.pinView handleWindowEvent:event]) [super sendEvent:event];
+}
+- (BOOL)performKeyEquivalent:(NSEvent *)event {
+    if ((event.modifierFlags & NSEventModifierFlagCommand) && [self.pinView handleShortcut:event]) return YES;
+    return [super performKeyEquivalent:event];
+}
+@end
+
 @implementation XTPinView {
     NSTrackingArea *_tracking;
     NSUInteger _flashGeneration;
+    BOOL _spaceDrag;
 }
 - (instancetype)initWithFrame:(NSRect)frame {
     if ((self = [super initWithFrame:frame])) {
         self.wantsLayer = YES;
-        _toolbar = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 156, 34)];
+        _textSelection = [XTTextSelectionController new];
+        _textSelection.contentView = self;
+        _textSelection.overlayView.frame = self.bounds;
+        [self addSubview:_textSelection.overlayView];
+        __weak XTPinView *weakSelf = self;
+        _textSelection.onStateChange = ^{
+            XTPinView *view = weakSelf;
+            if (!view) return;
+            view.textButton.enabled = !view.textSelection.recognizing && view.textSelection.supported;
+            view.textButton.toolTip = [NSString stringWithFormat:@"%@\n点击全选文字 · ⌘A 全选 · ⇧⌘C 复制图片", view.textSelection.statusMessage];
+            view.textButton.contentTintColor = view.textSelection.hasText ? XTAccent() : NSColor.whiteColor;
+            [view.window invalidateCursorRectsForView:view];
+            if (view.textSelection.hasText) [view flash:view.textSelection.statusMessage];
+        };
+        _textSelection.contextMenuProvider = ^NSMenu *{ return [weakSelf.owner contextMenu] ?: [NSMenu new]; };
+        _toolbar = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 194, 34)];
         _toolbar.wantsLayer = YES; _toolbar.layer.backgroundColor = [NSColor colorWithWhite:0.13 alpha:0.94].CGColor;
         _toolbar.layer.cornerRadius = 8;
-        NSArray *symbols = @[@"doc.on.doc", @"square.and.arrow.down", @"arrow.up.left.and.arrow.down.right", @"xmark"];
-        NSArray *tips = @[@"复制图片 ⌘C", @"保存图片 ⌘S", @"恢复原始大小 ⌘0", @"关闭贴图 ⌘W / Esc"];
-        NSArray *actions = @[@"copyImage:", @"saveImage:", @"resetImage:", @"closeImage:"];
-        for (NSInteger i = 0; i < 4; i++) {
+        NSArray *symbols = @[@"doc.on.doc", @"square.and.arrow.down", @"text.viewfinder", @"arrow.up.left.and.arrow.down.right", @"xmark"];
+        NSArray *tips = @[@"复制图片 ⇧⌘C", @"保存图片 ⌘S", @"提取文字 · ⌘A 全选文字", @"恢复原始大小 ⌘0", @"关闭贴图 ⌘W"];
+        NSArray *actions = @[@"copyImage:", @"saveImage:", @"extractText:", @"resetImage:", @"closeImage:"];
+        for (NSInteger i = 0; i < 5; i++) {
             NSButton *b = XTSymbolButton(symbols[i], tips[i], self, NSSelectorFromString(actions[i]));
             b.frame = NSMakeRect(4 + 38 * i, 3, 34, 28); b.contentTintColor = NSColor.whiteColor;
+            if (i == 2) self.textButton = b;
             [_toolbar addSubview:b];
         }
         [self addSubview:_toolbar]; _toolbar.hidden = YES;
@@ -62,8 +107,26 @@
 - (BOOL)acceptsFirstMouse:(NSEvent *)event { return YES; }
 - (void)layout {
     [super layout];
-    self.toolbar.frame = NSMakeRect(MAX(0, (self.bounds.size.width - 156) / 2), MAX(0, self.bounds.size.height - 42), 156, 34);
-    self.feedback.frame = NSMakeRect(MAX(2, (self.bounds.size.width - 130) / 2), 8, MIN(130, self.bounds.size.width - 4), 23);
+    self.textSelection.overlayView.frame = self.bounds;
+    [self.textSelection updateLayout];
+    self.toolbar.frame = NSMakeRect(MAX(0, (self.bounds.size.width - 194) / 2), MAX(0, self.bounds.size.height - 42), 194, 34);
+    if (self.bounds.size.width < 198 || self.bounds.size.height < 65) self.toolbar.hidden = YES;
+    CGFloat feedbackWidth = MIN(MAX(0, self.bounds.size.width - 4), MAX(130, self.feedback.intrinsicContentSize.width + 20));
+    self.feedback.frame = NSMakeRect(MAX(2, (self.bounds.size.width - feedbackWidth) / 2), 8, feedbackWidth, 23);
+}
+- (NSView *)hitTest:(NSPoint)point {
+    NSView *hit = [super hitTest:point];
+    NSView *overlay = self.textSelection.overlayView;
+    if (hit && (hit == overlay || [hit isDescendantOf:overlay])) {
+        NSPoint imagePoint = [overlay convertPoint:point fromView:self.superview];
+        // 工具栏在覆盖层上方；仅文字区域进入系统选择交互。
+        if (_spaceDrag || ![self.textSelection hasTextAtPoint:imagePoint]) return self;
+    }
+    return hit;
+}
+- (void)resetCursorRects {
+    [super resetCursorRects];
+    if (_spaceDrag) [self addCursorRect:self.bounds cursor:NSCursor.openHandCursor];
 }
 - (void)updateTrackingAreas {
     [super updateTrackingAreas];
@@ -79,11 +142,12 @@
     NSBezierPath *border = [NSBezierPath bezierPathWithRoundedRect:NSInsetRect(self.bounds, 0.5, 0.5) xRadius:self.layer.cornerRadius yRadius:self.layer.cornerRadius];
     border.lineWidth = 1; [border stroke];
 }
-- (void)mouseEntered:(NSEvent *)event { self.toolbar.hidden = self.bounds.size.width < 160 || self.bounds.size.height < 65; }
+- (void)mouseEntered:(NSEvent *)event { self.toolbar.hidden = self.bounds.size.width < 198 || self.bounds.size.height < 65; }
 - (void)mouseExited:(NSEvent *)event { self.toolbar.hidden = YES; }
 - (void)mouseDown:(NSEvent *)event {
     [self.window makeKeyWindow]; [self.window makeFirstResponder:self];
-    if (event.clickCount == 2 && [[NSUserDefaults standardUserDefaults] boolForKey:@"doubleClickCloses"]) { XTCopyImage(self.owner.image); [self.owner closePin:nil]; return; }
+    [self.textSelection clearSelection];
+    if (!_spaceDrag && event.clickCount == 2 && [[NSUserDefaults standardUserDefaults] boolForKey:@"doubleClickCloses"]) { XTCopyImage(self.owner.image); [self.owner closePin:nil]; return; }
     [self.window performWindowDragWithEvent:event];
 }
 - (void)rightMouseDown:(NSEvent *)event { [NSMenu popUpContextMenu:[self.owner contextMenu] withEvent:event forView:self]; }
@@ -93,23 +157,48 @@
     else [self.owner scaleBy:pow(1.035, delta)];
 }
 - (void)magnifyWithEvent:(NSEvent *)event { [self.owner scaleBy:MAX(0.5, 1 + event.magnification)]; }
-- (void)keyDown:(NSEvent *)event {
+- (BOOL)handleShortcut:(NSEvent *)event {
     NSString *s = event.charactersIgnoringModifiers.lowercaseString;
     BOOL command = (event.modifierFlags & NSEventModifierFlagCommand) != 0;
-    if (event.keyCode == 53 || (command && [s isEqual:@"w"])) [self.owner closePin:nil];
-    else if (command && [s isEqual:@"c"]) [self.owner copy:nil];
+    if (event.modifierFlags & (NSEventModifierFlagControl | NSEventModifierFlagOption)) return NO;
+    if (event.keyCode == 53) {
+        if (self.textSelection.hasSelection) { [self.textSelection clearSelection]; [self.window makeFirstResponder:self]; }
+        else [self.owner closePin:nil];
+    }
+    else if (command && [s isEqual:@"w"]) [self.owner closePin:nil];
+    else if (command && [s isEqual:@"c"]) {
+        if (event.modifierFlags & NSEventModifierFlagShift) [self.owner copyImage:nil];
+        else [self.owner copy:nil];
+    }
+    else if (command && [s isEqual:@"a"]) [self.owner selectAll:nil];
     else if (command && [s isEqual:@"s"]) [self.owner save:nil];
     else if (command && [s isEqual:@"0"]) [self.owner resetSize:nil];
     else if ([s isEqual:@"+"] || [s isEqual:@"="]) [self.owner scaleBy:1.1];
     else if ([s isEqual:@"-"]) [self.owner scaleBy:1 / 1.1];
-    else [super keyDown:event];
+    else return NO;
+    return YES;
+}
+- (BOOL)handleWindowEvent:(NSEvent *)event {
+    if (event.type == NSEventTypeKeyDown) {
+        if (event.keyCode == 49 && !(event.modifierFlags & (NSEventModifierFlagCommand | NSEventModifierFlagControl | NSEventModifierFlagOption))) {
+            _spaceDrag = YES; [self.window invalidateCursorRectsForView:self]; return YES;
+        }
+        return [self handleShortcut:event];
+    }
+    if (event.type == NSEventTypeKeyUp && event.keyCode == 49 && _spaceDrag) { [self clearSpaceDrag]; return YES; }
+    return NO;
+}
+- (void)clearSpaceDrag { _spaceDrag = NO; [self.window invalidateCursorRectsForView:self]; }
+- (void)startTextRecognition { [self.textSelection recognizeImage:self.owner.image]; }
+- (void)keyDown:(NSEvent *)event {
+    if (![self handleShortcut:event]) [super keyDown:event];
 }
 - (BOOL)performKeyEquivalent:(NSEvent *)event {
-    if ((event.modifierFlags & NSEventModifierFlagCommand) && [@[@"w", @"c", @"s", @"0", @"+", @"=", @"-"] containsObject:event.charactersIgnoringModifiers.lowercaseString]) { [self keyDown:event]; return YES; }
+    if ((event.modifierFlags & NSEventModifierFlagCommand) && [self handleShortcut:event]) return YES;
     return [super performKeyEquivalent:event];
 }
 - (void)flash:(NSString *)message {
-    self.feedback.stringValue = message; self.feedback.hidden = NO;
+    self.feedback.stringValue = message; self.feedback.hidden = NO; self.needsLayout = YES;
     NSUInteger generation = ++_flashGeneration;
     __weak XTPinView *weakSelf = self;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC), dispatch_get_main_queue(), ^{
@@ -118,7 +207,9 @@
     });
 }
 - (void)copy:(id)sender { [self.owner copy:sender]; }
-- (void)copyImage:(id)sender { [self.owner copy:sender]; }
+- (void)copyImage:(id)sender { [self.owner copyImage:sender]; }
+- (void)extractText:(id)sender { [self.owner extractText:sender]; }
+- (void)selectAll:(id)sender { [self.owner selectAll:sender]; }
 - (void)saveImage:(id)sender { [self.owner save:sender]; }
 - (void)resetImage:(id)sender { [self.owner resetSize:sender]; }
 - (void)closeImage:(id)sender { [self.owner closePin:sender]; }
@@ -146,8 +237,9 @@
         panel.releasedWhenClosed = NO; panel.animationBehavior = NSWindowAnimationBehaviorNone;
         panel.alphaValue = MAX(0.2, MIN(1, [[NSUserDefaults standardUserDefaults] doubleForKey:@"defaultOpacity"]));
         self.pinView = [[XTPinView alloc] initWithFrame:NSMakeRect(0, 0, size.width, size.height)];
-        self.pinView.owner = self; panel.contentView = self.pinView;
+        self.pinView.owner = self; panel.contentView = self.pinView; panel.pinView = self.pinView;
         [self refreshAppearance];
+        [self.pinView startTextRecognition];
     }
     return self;
 }
@@ -173,7 +265,32 @@
     self.window.alphaValue = MAX(0.2, MIN(1, self.window.alphaValue + delta));
     [self.pinView flash:[NSString stringWithFormat:@"不透明度 %.0f%%", self.window.alphaValue * 100]];
 }
-- (void)copy:(id)sender { XTCopyImage(self.image); [self.pinView flash:@"已复制"]; }
+- (void)copy:(id)sender {
+    if (self.pinView.textSelection.selectedText.length) [self copySelectedText:sender];
+    else [self copyImage:sender];
+}
+- (void)copyImage:(id)sender { XTCopyImage(self.image); [self.pinView flash:@"已复制图片"]; }
+- (void)copyText:(NSString *)text {
+    if (!text.length) { [self.pinView flash:self.pinView.textSelection.statusMessage]; return; }
+    NSPasteboard *pasteboard = NSPasteboard.generalPasteboard;
+    [pasteboard clearContents]; [pasteboard setString:text forType:NSPasteboardTypeString];
+    [self.pinView flash:@"已复制文字"];
+}
+- (void)copySelectedText:(id)sender { [self copyText:self.pinView.textSelection.selectedText]; }
+- (void)copyAllText:(id)sender { [self copyText:self.pinView.textSelection.recognizedText]; }
+- (void)selectAll:(id)sender {
+    if (!self.pinView.textSelection.hasText) { [self.pinView flash:self.pinView.textSelection.statusMessage]; return; }
+    [self.window makeKeyWindow]; [self.pinView.textSelection selectAllText];
+    [self.pinView flash:@"已全选文字 · ⌘C 复制"];
+}
+- (void)extractText:(id)sender {
+    if (self.pinView.textSelection.hasText) [self selectAll:sender];
+    else if (self.pinView.textSelection.recognizing) [self.pinView flash:self.pinView.textSelection.statusMessage];
+    else [self recognizeText:sender];
+}
+- (void)recognizeText:(id)sender {
+    [self.pinView startTextRecognition]; [self.pinView flash:self.pinView.textSelection.statusMessage];
+}
 - (void)save:(id)sender { XTSaveImage(self.image, nil); }
 - (void)closePin:(id)sender { [self close]; }
 - (void)resetSize:(id)sender { [self setScaleKeepingCenter:1]; }
@@ -186,16 +303,31 @@
 }
 - (void)opacityChanged:(NSSlider *)slider { self.window.alphaValue = slider.doubleValue; }
 - (NSMenu *)contextMenu {
-    NSMenu *m = [NSMenu new];
+    NSMenu *m = [NSMenu new]; m.autoenablesItems = NO;
     NSSize pixels = XTPixelSize(self.image);
     NSMenuItem *info = [[NSMenuItem alloc] initWithTitle:[NSString stringWithFormat:@"%.0f × %.0f 像素 · %.0f%%", pixels.width, pixels.height, self.scale * 100] action:nil keyEquivalent:@""];
     info.enabled = NO; [m addItem:info]; [m addItem:NSMenuItem.separatorItem];
+    XTTextSelectionController *text = self.pinView.textSelection;
+    NSMenuItem *selected = [[NSMenuItem alloc] initWithTitle:@"复制选中文字" action:@selector(copySelectedText:) keyEquivalent:@"c"];
+    selected.target = self; selected.enabled = text.selectedText.length > 0; [m addItem:selected];
+    NSMenuItem *all = [[NSMenuItem alloc] initWithTitle:@"复制全部文字" action:@selector(copyAllText:) keyEquivalent:@""];
+    all.target = self; all.enabled = text.hasText; [m addItem:all];
+    NSMenuItem *select = [[NSMenuItem alloc] initWithTitle:@"全选文字" action:@selector(selectAll:) keyEquivalent:@"a"];
+    select.target = self; select.enabled = text.hasText; [m addItem:select];
+    if (!text.hasText) {
+        NSMenuItem *status = [[NSMenuItem alloc] initWithTitle:text.statusMessage action:nil keyEquivalent:@""];
+        status.enabled = NO; [m addItem:status];
+    }
+    NSMenuItem *retry = [[NSMenuItem alloc] initWithTitle:@"重新识别文字" action:@selector(recognizeText:) keyEquivalent:@""];
+    retry.target = self; retry.enabled = text.supported && !text.recognizing; [m addItem:retry];
+    [m addItem:NSMenuItem.separatorItem];
     NSArray *titles = @[@"复制图片", @"保存为 PNG…", @"恢复原始大小", @"适应屏幕"];
-    NSArray *actions = @[@"copy:", @"save:", @"resetSize:", @"fitToScreen:"];
+    NSArray *actions = @[@"copyImage:", @"save:", @"resetSize:", @"fitToScreen:"];
     NSArray *keys = @[@"c", @"s", @"0", @""];
     for (NSUInteger i = 0; i < titles.count; i++) {
         NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:titles[i] action:NSSelectorFromString(actions[i]) keyEquivalent:keys[i]];
         item.target = self; [m addItem:item];
+        if (i == 0) item.keyEquivalentModifierMask = NSEventModifierFlagCommand | NSEventModifierFlagShift;
     }
     [m addItem:NSMenuItem.separatorItem];
     NSView *opacityView = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 230, 48)];
@@ -207,5 +339,9 @@
     NSMenuItem *close = [[NSMenuItem alloc] initWithTitle:@"关闭贴图" action:@selector(closePin:) keyEquivalent:@"w"];
     close.target = self; [m addItem:close]; return m;
 }
-- (void)windowWillClose:(NSNotification *)notification { if (self.onClose) self.onClose(self); }
+- (void)windowDidResignKey:(NSNotification *)notification { [self.pinView clearSpaceDrag]; }
+- (void)windowWillClose:(NSNotification *)notification {
+    [self.pinView clearSpaceDrag]; [self.pinView.textSelection invalidate];
+    if (self.onClose) self.onClose(self);
+}
 @end
