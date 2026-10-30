@@ -4,6 +4,72 @@
 #import "XTCommon.h"
 #import <QuartzCore/QuartzCore.h>
 
+// 八个方向从左下角开始，沿逆时针顺序排列；选区与矩形共用同一套几何规则。
+static NSArray<NSValue *> *XTHandlePoints(NSRect r) {
+    return @[[NSValue valueWithPoint:NSMakePoint(NSMinX(r), NSMinY(r))], [NSValue valueWithPoint:NSMakePoint(NSMidX(r), NSMinY(r))],
+             [NSValue valueWithPoint:NSMakePoint(NSMaxX(r), NSMinY(r))], [NSValue valueWithPoint:NSMakePoint(NSMaxX(r), NSMidY(r))],
+             [NSValue valueWithPoint:NSMakePoint(NSMaxX(r), NSMaxY(r))], [NSValue valueWithPoint:NSMakePoint(NSMidX(r), NSMaxY(r))],
+             [NSValue valueWithPoint:NSMakePoint(NSMinX(r), NSMaxY(r))], [NSValue valueWithPoint:NSMakePoint(NSMinX(r), NSMidY(r))]];
+}
+
+static NSInteger XTHandleAtPoint(NSPoint p, NSRect rect, BOOL includeEdges, NSRect visibleRect) {
+    if (NSIsEmptyRect(rect)) return -1;
+    NSArray<NSValue *> *points = XTHandlePoints(rect);
+    NSInteger closest = -1;
+    CGFloat distance = CGFLOAT_MAX;
+    for (NSInteger i = 0; i < 8; i++) {
+        NSPoint h = points[i].pointValue;
+        if (h.x < NSMinX(visibleRect) || h.x > NSMaxX(visibleRect) || h.y < NSMinY(visibleRect) || h.y > NSMaxY(visibleRect)) continue;
+        CGFloat dx = fabs(h.x - p.x), dy = fabs(h.y - p.y);
+        CGFloat squared = dx * dx + dy * dy;
+        if (dx <= 7 && dy <= 7 && squared < distance) { closest = i; distance = squared; }
+    }
+    if (closest >= 0 || !includeEdges || !NSPointInRect(p, NSInsetRect(rect, -7, -7))) return closest;
+    CGFloat distances[] = {fabs(p.y - NSMinY(rect)), fabs(p.x - NSMaxX(rect)), fabs(p.y - NSMaxY(rect)), fabs(p.x - NSMinX(rect))};
+    for (NSInteger i = 0; i < 4; i++) if (distances[i] <= 7 && distances[i] < distance) { closest = i * 2 + 1; distance = distances[i]; }
+    return closest;
+}
+
+static NSRect XTRectByDraggingHandle(NSRect rect, NSInteger handle, NSSize delta, NSRect limit) {
+    if (delta.width == 0 && delta.height == 0) return rect;
+    CGFloat x1 = NSMinX(rect), x2 = NSMaxX(rect), y1 = NSMinY(rect), y2 = NSMaxY(rect);
+    if (delta.width != 0 && (handle == 0 || handle == 6 || handle == 7)) x1 = MIN(x2 - 3, MAX(NSMinX(limit), x1 + delta.width));
+    if (delta.width != 0 && (handle == 2 || handle == 3 || handle == 4)) x2 = MAX(x1 + 3, MIN(NSMaxX(limit), x2 + delta.width));
+    if (delta.height != 0 && (handle == 0 || handle == 1 || handle == 2)) y1 = MIN(y2 - 3, MAX(NSMinY(limit), y1 + delta.height));
+    if (delta.height != 0 && (handle == 4 || handle == 5 || handle == 6)) y2 = MAX(y1 + 3, MIN(NSMaxY(limit), y2 + delta.height));
+    return NSMakeRect(x1, y1, x2 - x1, y2 - y1);
+}
+
+static NSCursor *XTResizeCursor(NSInteger handle) {
+    if (@available(macOS 15.0, *)) {
+        NSCursorFrameResizePosition positions[] = {NSCursorFrameResizePositionBottomLeft, NSCursorFrameResizePositionBottom,
+            NSCursorFrameResizePositionBottomRight, NSCursorFrameResizePositionRight, NSCursorFrameResizePositionTopRight,
+            NSCursorFrameResizePositionTop, NSCursorFrameResizePositionTopLeft, NSCursorFrameResizePositionLeft};
+        return [NSCursor frameResizeCursorFromPosition:positions[handle] inDirections:NSCursorFrameResizeDirectionsAll];
+    }
+    if (handle == 1 || handle == 5) return NSCursor.resizeUpDownCursor;
+    if (handle == 3 || handle == 7) return NSCursor.resizeLeftRightCursor;
+    static NSCursor *diagonals[2];
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        for (NSInteger i = 0; i < 2; i++) {
+            NSImage *image = [NSImage imageWithSize:NSMakeSize(24, 24) flipped:NO drawingHandler:^BOOL(NSRect rect) {
+                NSBezierPath *path = [NSBezierPath bezierPath];
+                CGFloat (^y)(CGFloat) = ^CGFloat(CGFloat value) { return i == 0 ? value : 24 - value; };
+                [path moveToPoint:NSMakePoint(5, y(5))]; [path lineToPoint:NSMakePoint(19, y(19))];
+                [path moveToPoint:NSMakePoint(5, y(11))]; [path lineToPoint:NSMakePoint(5, y(5))]; [path lineToPoint:NSMakePoint(11, y(5))];
+                [path moveToPoint:NSMakePoint(13, y(19))]; [path lineToPoint:NSMakePoint(19, y(19))]; [path lineToPoint:NSMakePoint(19, y(13))];
+                path.lineCapStyle = NSLineCapStyleRound; path.lineJoinStyle = NSLineJoinStyleRound;
+                path.lineWidth = 4; [NSColor.whiteColor setStroke]; [path stroke];
+                path.lineWidth = 2; [NSColor.blackColor setStroke]; [path stroke];
+                return YES;
+            }];
+            diagonals[i] = [[NSCursor alloc] initWithImage:image hotSpot:NSMakePoint(12, 12)];
+        }
+    });
+    return diagonals[handle == 0 || handle == 4 ? 0 : 1];
+}
+
 // 编辑区域的空白部分不拦截画布点击；工具栏空白则消费点击，防止误绘制。
 @interface XTEditorClipView : NSView @end
 @implementation XTEditorClipView
@@ -44,6 +110,8 @@
     BOOL _startedFreeDrag;
     NSInteger _dragMode;
     BOOL _dragging;
+    BOOL _spaceDown;
+    NSInteger _annotationResizeHandle;
     NSTrackingArea *_tracking;
     NSView *_toolbar;
     NSTextField *_instruction;
@@ -111,7 +179,7 @@
     _toolButtons = [NSMutableArray array]; _colorButtons = [NSMutableArray array];
     NSArray *names = @[@"选择 V", @"矩形 R", @"箭头 A", @"文本 X"];
     NSArray *symbols = @[@"cursorarrow", @"rectangle", @"arrow.up.right", @"textformat"];
-    NSArray *tips = @[@"选择、移动标注；拖动空白区域或边缘调整选区", @"拖动绘制矩形框", @"从起点拖向终点绘制箭头", @"点击输入文字；回车换行，⌘回车完成"];
+    NSArray *tips = @[@"选择、移动标注；拖动控制点缩放；空格拖动移动截图选区", @"拖动绘制矩形框；拖动已有矩形的边框移动、控制点缩放；R 继续画框", @"从起点拖向终点绘制箭头", @"点击输入文字；回车换行，⌘回车完成"];
     for (NSInteger i = 0; i < 4; i++) {
         NSButton *b = [self toolbarButton:names[i] symbol:symbols[i] tip:tips[i] x:8 + i * 46 width:44 action:@selector(toolChanged:)];
         b.tag = i; [_toolButtons addObject:b];
@@ -179,7 +247,8 @@
     _undoButton.enabled = _textEditor ? _textEditor.undoManager.canUndo : _undoStack.count > 0;
     _redoButton.enabled = _textEditor ? _textEditor.undoManager.canRedo : _redoStack.count > 0;
     _deleteButton.enabled = [self selectedAnnotation] != nil;
-    _styleHint.stringValue = _textEditor ? @"回车换行 · ⌘回车完成" : (_tool == 3 ? @"点击输入 · 双击文字可修改" : @"选中标注可移动或删除");
+    BOOL rectangle = [self selectedAnnotation].kind == XTAnnotationRectangle;
+    _styleHint.stringValue = _textEditor ? @"回车换行 · ⌘回车完成" : (_tool == 3 ? @"点击输入 · 双击文字可修改" : (rectangle ? @"拖动框内移动 · 拖动控制点缩放" : @"空格拖动选区 · 选中标注可编辑"));
     self.needsDisplay = YES;
 }
 - (NSArray<XTAnnotation *> *)snapshotAnnotations { return [[NSArray alloc] initWithArray:_annotations copyItems:YES]; }
@@ -194,19 +263,26 @@
     [self addTrackingArea:_tracking];
 }
 - (NSArray<NSValue *> *)handlePoints {
-    NSRect r = self.selection;
-    return @[[NSValue valueWithPoint:NSMakePoint(NSMinX(r), NSMinY(r))], [NSValue valueWithPoint:NSMakePoint(NSMidX(r), NSMinY(r))],
-             [NSValue valueWithPoint:NSMakePoint(NSMaxX(r), NSMinY(r))], [NSValue valueWithPoint:NSMakePoint(NSMaxX(r), NSMidY(r))],
-             [NSValue valueWithPoint:NSMakePoint(NSMaxX(r), NSMaxY(r))], [NSValue valueWithPoint:NSMakePoint(NSMidX(r), NSMaxY(r))],
-             [NSValue valueWithPoint:NSMakePoint(NSMinX(r), NSMaxY(r))], [NSValue valueWithPoint:NSMakePoint(NSMinX(r), NSMidY(r))]];
+    return XTHandlePoints(self.selection);
 }
 - (NSInteger)handleAt:(NSPoint)p {
-    if (NSIsEmptyRect(self.selection) || _tool != 0) return -1;
-    NSArray *points = [self handlePoints];
-    for (NSInteger i = 0; i < 8; i++) {
-        NSPoint h = [points[i] pointValue]; if (fabs(h.x - p.x) <= 7 && fabs(h.y - p.y) <= 7) return i;
-    }
-    return -1;
+    return XTHandleAtPoint(p, self.selection, YES, self.bounds);
+}
+- (NSRect)rectangleFrame:(XTAnnotation *)item {
+    return NSMakeRect(MIN(item.start.x, item.end.x), MIN(item.start.y, item.end.y), fabs(item.end.x - item.start.x), fabs(item.end.y - item.start.y));
+}
+- (NSInteger)annotationHandleAt:(NSPoint)p {
+    XTAnnotation *item = [self selectedAnnotation];
+    if (_textEditor || (_tool != 0 && _tool != 1) || item.kind != XTAnnotationRectangle) return -1;
+    return XTHandleAtPoint(p, [self rectangleFrame:item], NO, self.selection);
+}
+- (NSInteger)editableAnnotationAt:(NSPoint)p {
+    NSInteger hit = [self annotationAt:p];
+    if (_tool == 1 && hit != NSNotFound && _annotations[hit].kind != XTAnnotationRectangle) hit = NSNotFound;
+    XTAnnotation *selected = [self selectedAnnotation];
+    if (hit == NSNotFound && (_tool == 0 || _tool == 1) && selected.kind == XTAnnotationRectangle &&
+        NSPointInRect(p, self.selection) && NSPointInRect(p, [self rectangleFrame:selected])) return _selectedIndex;
+    return hit;
 }
 - (NSInteger)annotationAt:(NSPoint)p {
     if (!NSPointInRect(p, self.selection)) return NSNotFound;
@@ -233,10 +309,21 @@
     [NSGraphicsContext restoreGraphicsState];
     [[NSColor colorWithSRGBRed:0.2 green:0.9 blue:0.73 alpha:1] setStroke];
     NSBezierPath *border = [NSBezierPath bezierPathWithRect:shown]; border.lineWidth = 1.5; [border stroke];
-    if (!preview && !_dragging && _tool == 0) for (NSValue *v in [self handlePoints]) {
+    if (!preview && !_dragging && !_textEditor) for (NSValue *v in [self handlePoints]) {
         NSPoint p = v.pointValue;
         NSBezierPath *handle = [NSBezierPath bezierPathWithRoundedRect:NSMakeRect(p.x - 3.5, p.y - 3.5, 7, 7) xRadius:1.5 yRadius:1.5];
         [NSColor.whiteColor setFill]; [handle fill]; [XTAccent() setStroke]; [handle stroke];
+    }
+    // 标注控制点最后绘制，与命中优先级保持一致；被裁出截图范围的控制点不显示。
+    if (selected.kind == XTAnnotationRectangle && !_textEditor && (_tool == 0 || _tool == 1)) {
+        [NSGraphicsContext saveGraphicsState]; [NSBezierPath clipRect:self.selection];
+        for (NSValue *value in XTHandlePoints([self rectangleFrame:selected])) {
+            NSPoint p = value.pointValue;
+            if (p.x < NSMinX(self.selection) || p.x > NSMaxX(self.selection) || p.y < NSMinY(self.selection) || p.y > NSMaxY(self.selection)) continue;
+            NSBezierPath *handle = [NSBezierPath bezierPathWithRect:NSMakeRect(p.x - 3.5, p.y - 3.5, 7, 7)];
+            [NSColor.whiteColor setFill]; [handle fill]; [selected.color setStroke]; handle.lineWidth = 1; [handle stroke];
+        }
+        [NSGraphicsContext restoreGraphicsState];
     }
     NSSize pixels = XTPixelSize(self.snapshot);
     NSString *size = [NSString stringWithFormat:@"%@%.0f × %.0f", preview ? @"窗口 · " : @"", shown.size.width * pixels.width / self.bounds.size.width, shown.size.height * pixels.height / self.bounds.size.height];
@@ -308,15 +395,30 @@
 - (void)mouseMoved:(NSEvent *)event {
     [self refreshWindowHover];
     NSPoint p = [self convertPoint:event.locationInWindow fromView:nil];
+    [self updateCursorAt:p];
+}
+- (void)updateCursorAt:(NSPoint)p {
+    if (_dragging) {
+        if (_dragMode == 1 || _dragMode == 10) [NSCursor.closedHandCursor set];
+        else if (_dragMode == 12) [XTResizeCursor(_annotationResizeHandle) set];
+        else if (_dragMode >= 2 && _dragMode <= 9) [XTResizeCursor(_dragMode - 2) set];
+        else [NSCursor.crosshairCursor set];
+        return;
+    }
     if (NSIsEmptyRect(self.selection) && _hoverCandidate) { [NSCursor.crosshairCursor set]; return; }
     if (!_toolbar.hidden && NSPointInRect(p, _toolbar.frame)) { [NSCursor.arrowCursor set]; return; }
     if (_textEditor && NSPointInRect(p, [_editorScroll convertRect:_editorScroll.bounds toView:self])) { [NSCursor.IBeamCursor set]; return; }
-    NSInteger handle = [self handleAt:p];
-    if (_tool == 3 && NSPointInRect(p, self.selection)) [NSCursor.IBeamCursor set];
-    else if (handle == 1 || handle == 5) [NSCursor.resizeUpDownCursor set];
-    else if (handle == 3 || handle == 7) [NSCursor.resizeLeftRightCursor set];
-    else if (_tool == 0 && handle < 0 && NSPointInRect(p, self.selection)) [NSCursor.openHandCursor set];
+    if (_spaceDown && NSPointInRect(p, self.selection)) { [NSCursor.openHandCursor set]; return; }
+    NSInteger handle = [self annotationHandleAt:p];
+    if (handle < 0) handle = [self handleAt:p];
+    if (handle >= 0) [XTResizeCursor(handle) set];
+    else if (_tool == 3 && NSPointInRect(p, self.selection)) [NSCursor.IBeamCursor set];
+    else if ((_tool == 0 || (_tool == 1 && [self editableAnnotationAt:p] != NSNotFound)) && NSPointInRect(p, self.selection)) [NSCursor.openHandCursor set];
     else [NSCursor.crosshairCursor set];
+}
+- (void)refreshCursor {
+    NSPoint point = [self convertPoint:[self.window convertPointFromScreen:NSEvent.mouseLocation] fromView:nil];
+    [self updateCursorAt:point];
 }
 - (NSPoint)clampedPoint:(NSEvent *)event {
     NSPoint p = [self convertPoint:event.locationInWindow fromView:nil];
@@ -336,6 +438,13 @@
     a.color = _styleColor; a.lineWidth = _styleWidth; a.fontSize = _styleFont;
     return a;
 }
+- (void)beginAnnotationDragAt:(NSInteger)index handle:(NSInteger)handle {
+    [self selectAnnotationAt:index];
+    _movingOriginal = [_annotations[index] copy]; _moveBaseline = [self snapshotAnnotations];
+    _annotationResizeHandle = handle;
+    _dragMode = handle >= 0 ? 12 : 10; _dragging = YES;
+    _toolbar.hidden = YES; [self refreshCursor];
+}
 - (void)mouseDown:(NSEvent *)event {
     NSPoint p = [self clampedPoint:event];
     [self commitTextEditing];
@@ -349,13 +458,29 @@
     _hoverCandidate = nil;
     _dragging = NO; _dragMode = -1; _anchor = p; _startRect = self.selection;
     _pending = nil; _movingOriginal = nil; _moveBaseline = nil; _moveChanged = NO;
-    NSInteger hit = [self annotationAt:p];
+    NSInteger hit = [self editableAnnotationAt:p];
     BOOL hasSelection = !NSIsEmptyRect(self.selection);
+    NSInteger annotationHandle = [self annotationHandleAt:p];
+    NSInteger handle = [self handleAt:p];
+    if (hasSelection && _spaceDown && NSPointInRect(p, self.selection)) {
+        _selectedIndex = NSNotFound; _dragMode = 1; _dragging = YES;
+        _toolbar.hidden = YES; [self refreshToolbar]; [self refreshCursor]; return;
+    }
+    if (annotationHandle >= 0) { [self beginAnnotationDragAt:_selectedIndex handle:annotationHandle]; return; }
+    if (handle >= 0) {
+        _selectedIndex = NSNotFound; _dragMode = handle + 2; _dragging = YES;
+        _toolbar.hidden = YES; [self refreshToolbar]; [self refreshCursor]; return;
+    }
     if (hasSelection && _tool == 3) {
         if (!NSPointInRect(p, self.selection)) return;
         if (hit != NSNotFound && _annotations[hit].kind == XTAnnotationText) [self editTextAtIndex:hit point:p];
         else [self editTextAtIndex:NSNotFound point:p];
         return;
+    }
+    if (hasSelection && (_tool == 0 || _tool == 1) && hit != NSNotFound) {
+        [self selectAnnotationAt:hit];
+        if (event.clickCount == 2 && _annotations[hit].kind == XTAnnotationText) { [self editTextAtIndex:hit point:p]; return; }
+        [self beginAnnotationDragAt:hit handle:-1]; return;
     }
     if (hasSelection && (_tool == 1 || _tool == 2)) {
         if (!NSPointInRect(p, self.selection)) return;
@@ -363,21 +488,14 @@
         _pending = [self newAnnotation:(XTAnnotationKind)_tool at:p];
         _dragMode = 11; _dragging = YES; [self refreshToolbar]; return;
     }
-    NSInteger handle = [self handleAt:p];
-    if (hasSelection && hit != NSNotFound && handle < 0) {
-        [self selectAnnotationAt:hit];
-        if (event.clickCount == 2 && _annotations[hit].kind == XTAnnotationText) { [self editTextAtIndex:hit point:p]; return; }
-        _movingOriginal = [_annotations[hit] copy]; _moveBaseline = [self snapshotAnnotations];
-        _dragMode = 10; _dragging = YES; return;
-    }
     if (event.clickCount == 2 && hasSelection && NSPointInRect(p, self.selection)) { [self pinAction:nil]; return; }
     _selectedIndex = NSNotFound;
     // 已标注后，选区外单击只取消选中，避免误删整段标注；选区仍可通过边缘调整。
     if (_annotations.count > 0 && handle < 0 && !NSPointInRect(p, self.selection)) { [self refreshToolbar]; return; }
-    _dragMode = handle >= 0 ? handle + 2 : (hasSelection && NSPointInRect(p, self.selection) ? 1 : 0);
+    _dragMode = hasSelection && NSPointInRect(p, self.selection) ? 1 : 0;
     _dragging = YES;
     if (_dragMode == 0) { _lockedWindowID = kCGNullWindowID; self.selection = NSZeroRect; [_annotations removeAllObjects]; [_undoStack removeAllObjects]; [_redoStack removeAllObjects]; _tool = 0; }
-    _toolbar.hidden = YES; _instruction.hidden = YES; [self refreshToolbar];
+    _toolbar.hidden = YES; _instruction.hidden = YES; [self refreshToolbar]; [self refreshCursor];
 }
 - (NSSize)clampedTranslation:(NSSize)delta forItem:(XTAnnotation *)item {
     NSRect b = item.bounds, s = self.selection;
@@ -402,6 +520,15 @@
         XTAnnotation *moved = [_movingOriginal copy]; [moved moveBy:delta]; _annotations[_selectedIndex] = moved;
         self.needsDisplay = YES; return;
     }
+    if (_dragMode == 12 && _movingOriginal && [self selectedAnnotation]) {
+        NSRect original = [self rectangleFrame:_movingOriginal];
+        NSRect resized = XTRectByDraggingHandle(original, _annotationResizeHandle, NSMakeSize(p.x - _anchor.x, p.y - _anchor.y), self.selection);
+        _moveChanged = !NSEqualRects(original, resized);
+        XTAnnotation *item = [_movingOriginal copy];
+        item.start = resized.origin; item.end = NSMakePoint(NSMaxX(resized), NSMaxY(resized));
+        _annotations[_selectedIndex] = item;
+        self.needsDisplay = YES; return;
+    }
     if (_dragMode == 0) {
         NSPoint raw = [self convertPoint:event.locationInWindow fromView:nil];
         if (hypot(raw.x - _anchor.x, raw.y - _anchor.y) >= 4) _startedFreeDrag = YES;
@@ -414,14 +541,9 @@
         r.origin.y = MAX(0, MIN(self.bounds.size.height - r.size.height, r.origin.y + p.y - _anchor.y));
         self.selection = r;
     } else if (_dragMode >= 2 && _dragMode <= 9) {
-        NSInteger h = _dragMode - 2;
-        CGFloat x1 = NSMinX(_startRect), x2 = NSMaxX(_startRect), y1 = NSMinY(_startRect), y2 = NSMaxY(_startRect);
-        if (h == 0 || h == 6 || h == 7) x1 = MIN(p.x, x2 - 3);
-        if (h == 2 || h == 3 || h == 4) x2 = MAX(p.x, x1 + 3);
-        if (h == 0 || h == 1 || h == 2) y1 = MIN(p.y, y2 - 3);
-        if (h == 4 || h == 5 || h == 6) y2 = MAX(p.y, y1 + 3);
-        self.selection = NSIntersectionRect(self.bounds, NSMakeRect(x1, y1, x2 - x1, y2 - y1));
+        self.selection = XTRectByDraggingHandle(_startRect, _dragMode - 2, NSMakeSize(p.x - _anchor.x, p.y - _anchor.y), self.bounds);
     }
+    if ((_dragMode == 1 || (_dragMode >= 2 && _dragMode <= 9)) && !NSEqualRects(self.selection, _startRect)) _lockedWindowID = kCGNullWindowID;
     self.needsDisplay = YES;
 }
 - (void)mouseUp:(NSEvent *)event {
@@ -431,11 +553,12 @@
         CGFloat dx = fabs(_pending.end.x - _pending.start.x), dy = fabs(_pending.end.y - _pending.start.y);
         BOOL valid = _pending.kind == XTAnnotationRectangle ? dx >= 2 && dy >= 2 : hypot(dx, dy) >= 3;
         if (valid) { [self recordBefore:[self snapshotAnnotations]]; [_annotations addObject:_pending]; _selectedIndex = _annotations.count - 1; }
-        _pending = nil; [self refreshToolbar]; return;
+        _pending = nil; [self refreshToolbar]; [self refreshCursor]; return;
     }
-    if (_dragMode == 10) {
+    if (_dragMode == 10 || _dragMode == 12) {
         if (_moveChanged) [self recordBefore:_moveBaseline];
-        _movingOriginal = nil; _moveBaseline = nil; [self refreshToolbar]; return;
+        _movingOriginal = nil; _moveBaseline = nil;
+        [self positionToolbar]; _toolbar.hidden = NO; [self refreshToolbar]; [self refreshCursor]; return;
     }
     if (_dragMode == 0 && !_startedFreeDrag && _clickCandidate) {
         self.selection = _clickCandidate.frame; _lockedWindowID = _clickCandidate.windowID;
@@ -443,7 +566,7 @@
     _clickCandidate = nil;
     if (self.selection.size.width < 3 || self.selection.size.height < 3) { [self clearSelection]; return; }
     if (_dragMode == 0 && [[NSUserDefaults standardUserDefaults] boolForKey:@"autoPin"]) { [self pinAction:nil]; return; }
-    [self positionToolbar]; _toolbar.hidden = NO; [self refreshToolbar];
+    [self positionToolbar]; _toolbar.hidden = NO; [self refreshToolbar]; [self refreshCursor];
 }
 - (void)rightMouseDown:(NSEvent *)event {
     if (_textEditor) [self cancelTextEditing];
@@ -452,14 +575,14 @@
 - (void)clearSelection {
     [self cancelTextEditing];
     self.selection = NSZeroRect; _hoverCandidate = nil; _clickCandidate = nil; _lockedWindowID = kCGNullWindowID;
-    _toolbar.hidden = YES; _instruction.hidden = NO; _dragging = NO;
+    _toolbar.hidden = YES; _instruction.hidden = NO; _dragging = NO; _spaceDown = NO;
     _pending = nil; _selectedIndex = NSNotFound; _tool = 0;
     [_annotations removeAllObjects]; [_undoStack removeAllObjects]; [_redoStack removeAllObjects]; [self refreshToolbar];
 }
 - (void)toolChanged:(NSButton *)button { [self chooseTool:button.tag]; }
 - (void)chooseTool:(NSInteger)tool {
     [self commitTextEditing]; _tool = tool; _selectedIndex = NSNotFound;
-    [self.window makeFirstResponder:self]; [self refreshToolbar];
+    [self.window makeFirstResponder:self]; [self refreshToolbar]; [self refreshCursor];
 }
 - (void)colorChanged:(NSButton *)button {
     [self commitTextEditing]; _styleColor = _colors[button.tag];
@@ -610,6 +733,8 @@
     NSString *key = event.charactersIgnoringModifiers.lowercaseString;
     BOOL command = (event.modifierFlags & NSEventModifierFlagCommand) != 0;
     if (event.keyCode == 53) { [self.delegate selectionViewDidCancel:self]; return; }
+    if (!command && event.keyCode == 49 && !NSIsEmptyRect(self.selection)) { _spaceDown = YES; [self refreshCursor]; return; }
+    if (_dragging) return;
     if (!command && event.keyCode == 48) { [self.delegate selectionView:self cycleWindowBackward:(event.modifierFlags & NSEventModifierFlagShift) != 0]; return; }
     if (NSIsEmptyRect(self.selection)) { NSBeep(); return; }
     if (command && [key isEqual:@"z"]) {
@@ -636,10 +761,14 @@
             NSRect r = self.selection;
             r.origin.x = MAX(0, MIN(self.bounds.size.width - r.size.width, r.origin.x + delta.width));
             r.origin.y = MAX(0, MIN(self.bounds.size.height - r.size.height, r.origin.y + delta.height));
-            self.selection = r; [self positionToolbar];
+            self.selection = r; _lockedWindowID = kCGNullWindowID; [self positionToolbar];
         }
         [self refreshToolbar];
     } else [super keyDown:event];
+}
+- (void)keyUp:(NSEvent *)event {
+    if (event.keyCode == 49) { _spaceDown = NO; [self refreshCursor]; return; }
+    [super keyUp:event];
 }
 - (BOOL)performKeyEquivalent:(NSEvent *)event {
     if (_textEditor) return [super performKeyEquivalent:event];
